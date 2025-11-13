@@ -42,12 +42,39 @@
 
 <main>
   <div class="card">
-    <h2>0) Auto-Index dari Wallet (Hydrex Base)</h2>
-    <div class="small" style="margin-bottom:12px">Masukkan wallet address Base kamu untuk auto-detect posisi farming di Hydrex. Setelah load posisi, isi modal awal & utang kamu, lalu PnL akan otomatis terhitung.</div>
+    <h2>0) Quick Input dari DeBank (Hydrex Base)</h2>
+    <div class="small" style="margin-bottom:12px">
+      <strong>Cara 1 (Manual - Paling Mudah):</strong> Buka <a href="https://debank.com/profile/0xa009e89a7371aa2c447c8c978859914fa2cb593c" target="_blank" style="color:var(--accent)">DeBank profile kamu</a>, 
+      lihat posisi farming (contoh: IDRX+USDC dengan balance 192,689,841.6359 IDRX & 427.2327 USDC), 
+      lalu isi di form Quick Input di bawah ini.
+    </div>
+    
+    <div style="background:#0f141a;padding:12px;border-radius:8px;margin-bottom:12px;border:1px solid #1f2a35">
+      <h3 style="font-size:13px;margin:0 0 8px;color:var(--muted)">Quick Input Manual:</h3>
+      <div class="grid">
+        <div>
+          <label>Nama Pool (contoh: IDRX+USDC)</label>
+          <input id="quickPoolName" placeholder="IDRX+USDC" />
+        </div>
+        <div>
+          <label>Base Token (contoh: 192689841.6359)</label>
+          <input id="quickBaseAmount" placeholder="192689841.6359" />
+        </div>
+        <div>
+          <label>Quote Token (contoh: 427.2327)</label>
+          <input id="quickQuoteAmount" placeholder="427.2327" />
+        </div>
+      </div>
+      <button class="btn" id="quickLoad" style="margin-top:10px;width:100%">Load Posisi Ini</button>
+    </div>
+    
+    <div class="small" style="margin-bottom:12px">
+      <strong>Cara 2 (Auto - Butuh API Key):</strong> Masukkan wallet address untuk auto-detect (butuh DeBank API key).
+    </div>
     <div class="grid">
       <div style="grid-column:span 2">
         <label>Wallet Address (Base chain)</label>
-        <input id="walletAddress" placeholder="0x..." />
+        <input id="walletAddress" placeholder="0x..." value="0xa009e89a7371aa2c447c8c978859914fa2cb593c" />
       </div>
       <div>
         <button class="btn" id="fetchPositions" style="margin-top:24px">Fetch Posisi Farming</button>
@@ -165,83 +192,149 @@ async function fetchHydrexPositions(walletAddress){
   try{
     setStatus('Fetch posisi farming...');
     
-    // Try DeBank API for protocol positions
     let positions = [];
+    let errorMsg = '';
+    
+    // Method 1: Try DeBank API for protocol positions
     try {
+      setStatus('Coba DeBank API...');
       const protocolR = await fetch(`https://pro-openapi.debank.com/v1/user/protocol_list?id=${walletAddress}&chain_ids=base`, {
-        cache: 'no-store'
+        cache: 'no-store',
+        headers: {
+          'Accept': 'application/json'
+        }
       });
       
-      if(protocolR.ok) {
+      if(!protocolR.ok) {
+        const errorText = await protocolR.text();
+        console.log('DeBank API response status:', protocolR.status, errorText);
+        errorMsg += `DeBank API: ${protocolR.status} `;
+      } else {
         const protocols = await protocolR.json();
-        // Find Hydrex protocol
-        const hydrex = protocols.find(p => 
-          p.protocol_id === 'hydrex' || 
-          p.name?.toLowerCase().includes('hydrex') ||
-          p.id === 'hydrex'
-        );
+        console.log('DeBank protocols response:', protocols);
         
-        if(hydrex && hydrex.portfolio_item_list) {
-          for(const item of hydrex.portfolio_item_list) {
+        // Find Hydrex protocol - try multiple ways
+        const hydrex = protocols.find(p => {
+          const id = (p.protocol_id || p.id || '').toLowerCase();
+          const name = (p.name || '').toLowerCase();
+          return id === 'hydrex' || name.includes('hydrex');
+        });
+        
+        console.log('Found Hydrex protocol:', hydrex);
+        
+        if(hydrex) {
+          // Try different structures for portfolio items
+          const items = hydrex.portfolio_item_list || hydrex.items || hydrex.positions || [];
+          console.log('Portfolio items:', items);
+          
+          for(const item of items) {
             // Check if it's a farming/liquidity position
+            let tokens = [];
+            let poolName = item.name || item.pool_name || '';
+            
+            // Try multiple data structure paths
             if(item.detail) {
-              let tokens = [];
-              
-              // Try different data structures
               if(item.detail.supply_token_list) {
                 tokens = item.detail.supply_token_list;
               } else if(item.detail.pool?.supply_token_list) {
                 tokens = item.detail.pool.supply_token_list;
               } else if(item.detail.token_list) {
                 tokens = item.detail.token_list;
+              } else if(item.detail.tokens) {
+                tokens = item.detail.tokens;
               }
+            }
+            
+            // Also check direct token_list
+            if((!tokens || tokens.length === 0) && item.token_list) {
+              tokens = item.token_list;
+            }
+            
+            // Check supply_token_list directly
+            if((!tokens || tokens.length === 0) && item.supply_token_list) {
+              tokens = item.supply_token_list;
+            }
+            
+            console.log('Tokens found for item:', poolName, tokens);
+            
+            if(tokens && tokens.length >= 2) {
+              // Parse amounts (handle both string and number, with decimals)
+              const baseDecimals = tokens[0].decimals || 18;
+              const quoteDecimals = tokens[1].decimals || 18;
               
-              if(tokens && tokens.length >= 2) {
-                // Parse amounts (handle both string and number, with decimals)
-                const baseDecimals = tokens[0].decimals || 18;
-                const quoteDecimals = tokens[1].decimals || 18;
-                const baseRaw = parseFloat(tokens[0].amount || tokens[0].raw_amount || 0);
-                const quoteRaw = parseFloat(tokens[1].amount || tokens[1].raw_amount || 0);
-                const baseAmount = baseRaw / Math.pow(10, baseDecimals);
-                const quoteAmount = quoteRaw / Math.pow(10, quoteDecimals);
-                
+              // Handle different amount formats
+              let baseRaw = tokens[0].amount || tokens[0].raw_amount || tokens[0].balance || 0;
+              let quoteRaw = tokens[1].amount || tokens[1].raw_amount || tokens[1].balance || 0;
+              
+              // If it's already a number in human-readable format, use as-is
+              // Otherwise divide by decimals
+              const baseAmount = (typeof baseRaw === 'string' && baseRaw.includes('e')) 
+                ? parseFloat(baseRaw) 
+                : (baseRaw > 1e10 ? baseRaw / Math.pow(10, baseDecimals) : baseRaw);
+              const quoteAmount = (typeof quoteRaw === 'string' && quoteRaw.includes('e'))
+                ? parseFloat(quoteRaw)
+                : (quoteRaw > 1e10 ? quoteRaw / Math.pow(10, quoteDecimals) : quoteRaw);
+              
+              if(baseAmount > 0 || quoteAmount > 0) {
                 positions.push({
-                  pool: item.name || `${tokens[0].symbol}/${tokens[1].symbol}`,
+                  pool: poolName || `${tokens[0].symbol || 'TOKEN1'}+${tokens[1].symbol || 'TOKEN2'}`,
                   baseToken: {
-                    symbol: tokens[0].symbol,
-                    address: tokens[0].id || tokens[0].address,
+                    symbol: tokens[0].symbol || 'TOKEN1',
+                    address: tokens[0].id || tokens[0].address || tokens[0].token_id,
                     decimals: baseDecimals
                   },
                   quoteToken: {
-                    symbol: tokens[1].symbol,
-                    address: tokens[1].id || tokens[1].address,
+                    symbol: tokens[1].symbol || 'TOKEN2',
+                    address: tokens[1].id || tokens[1].address || tokens[1].token_id,
                     decimals: quoteDecimals
                   },
                   baseAmount: baseAmount,
                   quoteAmount: quoteAmount,
-                  usdValue: item.stats?.net_usd_value || item.usd_value || 0
+                  usdValue: item.stats?.net_usd_value || item.usd_value || item.value || 0
                 });
               }
             }
           }
+        } else {
+          console.log('Hydrex protocol not found. Available protocols:', protocols.map(p => ({id: p.protocol_id || p.id, name: p.name})));
         }
       }
     } catch(e) {
-      console.log('DeBank API error:', e);
-      // Continue to try other methods
+      console.error('DeBank API error:', e);
+      errorMsg += `DeBank: ${e.message} `;
     }
     
-    // Fallback: try direct Hydrex API if available
+    // Method 2: Try alternative DeBank endpoint
     if(positions.length === 0) {
       try {
+        setStatus('Coba DeBank alternative endpoint...');
+        const altR = await fetch(`https://pro-openapi.debank.com/v1/user/complex_protocol_list?id=${walletAddress}&chain_ids=base`, {
+          cache: 'no-store'
+        });
+        if(altR.ok) {
+          const data = await altR.json();
+          console.log('Alternative endpoint response:', data);
+          // Process similar to above
+        }
+      } catch(e) {
+        console.log('Alternative endpoint failed:', e);
+      }
+    }
+    
+    // Method 3: Try direct Hydrex API
+    if(positions.length === 0) {
+      try {
+        setStatus('Coba Hydrex API langsung...');
         const hydrexR = await fetch(`https://api.hydrex.fi/v1/positions/${walletAddress}?chain=base`, {
           cache: 'no-store'
         });
         if(hydrexR.ok) {
           const hydrexData = await hydrexR.json();
-          if(hydrexData.positions) {
-            positions = hydrexData.positions.map(pos => ({
-              pool: pos.pool_name || `${pos.token0?.symbol}/${pos.token1?.symbol}`,
+          console.log('Hydrex API response:', hydrexData);
+          if(hydrexData.positions || hydrexData.data) {
+            const posList = hydrexData.positions || hydrexData.data || [];
+            positions = posList.map(pos => ({
+              pool: pos.pool_name || pos.name || `${pos.token0?.symbol}/${pos.token1?.symbol}`,
               baseToken: { 
                 symbol: pos.token0?.symbol, 
                 address: pos.token0?.address, 
@@ -252,15 +345,20 @@ async function fetchHydrexPositions(walletAddress){
                 address: pos.token1?.address,
                 decimals: pos.token1?.decimals || 18
               },
-              baseAmount: pos.amount0,
-              quoteAmount: pos.amount1,
-              usdValue: pos.usd_value || 0
+              baseAmount: pos.amount0 || pos.amount_0,
+              quoteAmount: pos.amount1 || pos.amount_1,
+              usdValue: pos.usd_value || pos.value || 0
             }));
           }
         }
       } catch(e) {
-        console.log('Hydrex API not available');
+        console.log('Hydrex API error:', e);
+        errorMsg += `Hydrex API: ${e.message} `;
       }
+    }
+    
+    if(positions.length === 0 && errorMsg) {
+      throw new Error(`Tidak ada posisi ditemukan. Errors: ${errorMsg}. Cek console untuk detail.`);
     }
     
     return positions;
@@ -330,6 +428,7 @@ $('fetchPositions').addEventListener('click', async ()=>{
   }
   
   try {
+    console.log('Fetching positions for wallet:', wallet);
     const positions = await fetchHydrexPositions(wallet);
     cachedPositions = positions;
     
@@ -337,23 +436,75 @@ $('fetchPositions').addEventListener('click', async ()=>{
     select.innerHTML = '<option value="">— pilih posisi —</option>';
     
     if(positions.length === 0) {
-      setStatus('Tidak ada posisi farming ditemukan');
+      setStatus('Tidak ada posisi farming ditemukan. Buka Console (F12) untuk detail error.');
       $('positionsList').style.display = 'none';
+      
+      // Show helpful message
+      console.log('=== DEBUG INFO ===');
+      console.log('Jika posisi farming terlihat di DeBank tapi tidak terdeteksi:');
+      console.log('1. Buka DeBank di browser lain, cek posisi farming kamu');
+      console.log('2. Copy manual: Base token, Quote token, dan jumlahnya');
+      console.log('3. Isi manual di section 3 (Posisi Sekarang)');
+      console.log('4. Cari pair URL di DexScreener dan paste di section 1');
       return;
     }
     
     positions.forEach((pos, idx) => {
       const opt = document.createElement('option');
       opt.value = idx;
-      opt.textContent = `${pos.pool} ($${pos.usdValue.toFixed(2)})`;
+      const usdVal = pos.usdValue ? `$${pos.usdValue.toFixed(2)}` : '';
+      opt.textContent = `${pos.pool} ${usdVal ? `(${usdVal})` : ''}`;
       select.appendChild(opt);
     });
     
     $('positionsList').style.display = 'block';
-    setStatus(`Ditemukan ${positions.length} posisi farming`);
+    setStatus(`✅ Ditemukan ${positions.length} posisi farming`);
   } catch(e) {
-    setStatus('Error: ' + e.message);
-    console.error(e);
+    setStatus('❌ Error: ' + e.message + ' (cek Console F12 untuk detail)');
+    console.error('=== FETCH ERROR ===', e);
+    console.log('Jika API gagal, kamu bisa input manual:');
+    console.log('1. Buka DeBank dan lihat posisi farming kamu');
+    console.log('2. Copy token amounts dan isi di section 3');
+    console.log('3. Cari pair di DexScreener dan paste URL di section 1');
+  }
+});
+
+// Quick Input handler
+$('quickLoad').addEventListener('click', async ()=>{
+  const poolName = $('quickPoolName').value.trim();
+  const baseAmount = $('quickBaseAmount').value.trim();
+  const quoteAmount = $('quickQuoteAmount').value.trim();
+  
+  if(!poolName || !baseAmount || !quoteAmount) {
+    setStatus('Isi semua field: Pool Name, Base Amount, Quote Amount');
+    return;
+  }
+  
+  // Parse pool name to extract token symbols (format: TOKEN1+TOKEN2)
+  const tokens = poolName.split('+').map(t => t.trim());
+  if(tokens.length !== 2) {
+    setStatus('Format pool name salah. Gunakan format: TOKEN1+TOKEN2 (contoh: IDRX+USDC)');
+    return;
+  }
+  
+  const baseSym = tokens[0];
+  const quoteSym = tokens[1];
+  
+  setStatus('Loading posisi...');
+  
+  // Auto-fill position data
+  $('baseNow').value = baseAmount;
+  $('quoteNow').value = quoteAmount;
+  
+  // Try to find and set pair URL
+  const pairUrl = await findPairAddress(baseSym, quoteSym, null, null);
+  
+  if(pairUrl) {
+    $('pairUrl').value = pairUrl;
+    setStatus(`✅ Loaded: ${poolName} - Base: ${baseAmount} ${baseSym}, Quote: ${quoteAmount} ${quoteSym}`);
+    setTimeout(() => refreshNow(), 500);
+  } else {
+    setStatus(`⚠️ Pair ${baseSym}/${quoteSym} tidak ditemukan. Cari manual di DexScreener & paste URL di section 1`);
   }
 });
 
